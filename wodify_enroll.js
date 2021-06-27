@@ -2,8 +2,8 @@
 
 const dotenv = require('dotenv').config();
 const fs = require('fs');
-const mailgunjs = require('mailgun-js');
 const puppeteer = require('puppeteer');
+const axios = require("axios");
 
 const DEFAULT_CONTINUOUS_POLL_AFTER_ENROLLMENT_OPENS_SECONDS = 300;
 const DEFAULT_CONTINUOUS_POLL_BEFORE_ENROLLMENT_OPENS_SECONDS = 300;
@@ -82,18 +82,14 @@ async function getDesiredOpenClasses(page, config) {
       // clang-format on
 
       const program = programColumn.innerText.toLowerCase();
-      const gymLocation = gymLocationColumn.innerText.toLowerCase();
       const startTime = startTimeColumn.innerText.toLowerCase();
 
       const desiredStartTime = config.enrollList[weekday]['time'].toLowerCase();
       const desiredProgram =
           config.enrollList[weekday]['program'].toLowerCase();
-      const desiredLocation =
-          config.enrollList[weekday]['location'].toLowerCase();
 
       if (!(startTime.trim().toLowerCase() === desiredStartTime &&
-            program.toLowerCase().includes(desiredProgram) &&
-            gymLocation.toLowerCase().includes(desiredLocation))) {
+            program.toLowerCase().includes(desiredProgram))) {
         continue;
       }
 
@@ -118,7 +114,6 @@ async function getDesiredOpenClasses(page, config) {
         weekday: weekday,
         time: startTime,
         program: program,
-        gymLocation: gymLocation,
         enrollActionId: enrollAction.id.toString(),
       });
     }
@@ -126,45 +121,63 @@ async function getDesiredOpenClasses(page, config) {
   }, WEEKDAYS, config);
 }
 
-async function sendEnrolledEmailNotification(
-    mailgun, enrolledClasses, credentials) {
+async function sendEnrolledNotification(enrolledClasses, gotifyURL) {
   const classPlurality = enrolledClasses.length == 1 ? '' : 'es';
   let message = `Registered in the following Wodify class${classPlurality}:\n`;
   enrolledClasses.forEach(enrolledClass => {
     message += `Time: ${capitalize(enrolledClass.weekday)} at ${
         enrolledClass.time.toUpperCase()}\n`;
-    message += `Program: ${capitalize(enrolledClass.gymLocation)}\n`;
-    message += `Location: ${capitalize(enrolledClass.program)}\n`;
+    message += `Program: ${capitalize(enrolledClass.program)}\n`;
   });
   message += '\n';
   message += `Verify your registration: ${WODIFY_CALENDAR_URI}`;
-  const email = {
-    from: `Wodify Class Notifier <postmaster@${credentials.domain}>`,
-    to: credentials.recipient,
-    subject: 'New Wodify class registration',
-    text: message,
+  const bodyFormData = {
+    title: "New Wodify class registration",
+    message: message,
+    priority: 5,
   };
-  await mailgun.messages().send(email);
+  await axios({
+    method: "post",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    url: gotifyURL,
+    data: bodyFormData,
+  }).then((response) => console.log(response.data))
+    .catch((err) => console.log(err.response ? error.response.data : err));
 }
 
-async function sendErrorEmailNotification(mailgun, error, credentials) {
-  const email = {
-    from: `Wodify Class Notifier <postmaster@${credentials.domain}>`,
-    to: credentials.recipient,
-    subject: 'Wodify class enroller failed',
-    text: `Oh snap! Wodify Class Enroller encountered an error: ${error}`,
-  };
+async function sendErrorNotification(error, gotifyURL) {
   await mailgun.messages().send(email);
+  const bodyFormData = {
+    title: "Wodify class enroller failed",
+    message: `Oh snap! Wodify Class Enroller encountered an error: ${error}`,
+    priority: 5,
+  };
+  await axios({
+    method: "post",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    url: gotifyURL,
+    data: bodyFormData,
+  }).then((response) => console.log(response.data))
+    .catch((err) => console.log(err.response ? error.response.data : err));
 }
 
 async function run(
-    wodifyCredentials, mailgunCredentials, enrollList, pollPeriodMilliseconds,
+    wodifyCredentials, enrollList, pollPeriodMilliseconds,
     resetPeriodMilliseconds, enrollmentOpeningBeforeClassMilliseconds,
     continuousPollBeforeEnrollmentOpensMilliseconds,
-    continuousPollAfterEnrollmentOpensMilliseconds, mailgun) {
+    continuousPollAfterEnrollmentOpensMilliseconds, gotifyURL) {
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
   await page.setViewport({width: VIEW_WIDTH, height: VIEW_HEIGHT});
+  page.on('console', consoleObj => {
+    if (consoleObj.type() === 'log') {
+        console.log(consoleObj.text());
+    }
+  })
 
   const loginConfig = {
     formId: WODIFY_LOGIN_FORM_ID,
@@ -234,8 +247,7 @@ async function run(
     for (const desiredClass of desiredOpenClasses) {
       log(`Attempting to enroll in ${capitalize(desiredClass.weekday)}'s ${
           desiredClass.time.toUpperCase()} ${
-          capitalize(desiredClass.program)} class in ${
-          capitalize(desiredClass.gymLocation)}...`);
+          capitalize(desiredClass.program)} class...`);
       await page.click(`#${desiredClass.enrollActionId}`);
       await page.waitForSelector(`#${WODIFY_CALENDAR_BANNER_NOTIFICATION_ID}`);
     }
@@ -245,14 +257,13 @@ async function run(
       await page.screenshot({path: SCREENSHOT_FILE_PATH, fullPage: true});
     }
 
-    if (mailgun !== undefined && 0 < desiredOpenClasses.length) {
-      log('Sending email notification...');
+    if (0 < desiredOpenClasses.length) {
+      log('Sending notification...');
       try {
-        await sendEnrolledEmailNotification(
-            mailgun, desiredOpenClasses, mailgunCredentials);
-        log('Sent email notification.');
+        await sendEnrolledNotification(desiredOpenClasses, gotifyURL);
+        log('Sent notification.');
       } catch (error) {
-        log(`Failed to send email notification: ${error}`);
+        log(`Failed to send notification: ${error}`);
       }
     }
 
@@ -322,9 +333,7 @@ async function run(
 
   const wodifyUsername = process.env.WODIFY_USERNAME;
   const wodifyPassword = process.env.WODIFY_PASSWORD;
-  const emailNotificationRecipient = process.env.EMAIL_NOTIFICATION_RECIPIENT;
-  const mailgunApiKey = process.env.MAILGUN_API_KEY;
-  const mailgunDomain = process.env.MAILGUN_DOMAIN;
+  const gotifyURL = process.env.GOTIFY_URL;
   const pollPeriodMilliseconds =
       (process.env.POLL_PERIOD_SECONDS || DEFAULT_POLL_PERIOD_SECONDS) * 1000;
   const resetPeriodMilliseconds =
@@ -355,6 +364,11 @@ async function run(
     password: wodifyPassword,
   };
 
+  if (gotifyURL === undefined) {
+    console.log('Missing Gotify URL.');
+    process.exit(1);
+  }
+
   if (enrollmentOpeningBeforeClassMinutes === undefined) {
     console.log('Missing enrollment opening time before class.');
     process.exit(1);
@@ -362,42 +376,13 @@ async function run(
   const enrollmentOpeningBeforeClassMilliseconds =
       enrollmentOpeningBeforeClassMinutes * 60 * 1000;
 
-  if (emailNotificationRecipient === undefined) {
-    log('Warning: Missing an email notification recipient. No email ' +
-        'notification will be sent.');
-  } else {
-    if (mailgunApiKey === undefined) {
-      log('Missing Mailgun API key.');
-      process.exit(1);
-    }
-    if (mailgunDomain === undefined) {
-      log('Missing Mailgun domain.');
-      process.exit(1);
-    }
-  }
-  const mailgunCredentials = {
-    recipient: emailNotificationRecipient,
-    apiKey: mailgunApiKey,
-    domain: mailgunDomain,
-  };
-  const mailgun = (() => {
-    if (emailNotificationRecipient === undefined ||
-        mailgunApiKey === undefined || mailgunDomain === undefined) {
-      return undefined;
-    }
-    return mailgunjs({
-      apiKey: mailgunCredentials.apiKey,
-      domain: mailgunCredentials.domain,
-    });
-  })();
-
   try {
-    run(wodifyCredentials, mailgunCredentials, enrollList,
+    run(wodifyCredentials, enrollList,
         pollPeriodMilliseconds, resetPeriodMilliseconds,
         enrollmentOpeningBeforeClassMilliseconds,
         continuousPollBeforeEnrollmentOpensMilliseconds,
-        continuousPollAfterEnrollmentOpensMilliseconds, mailgun);
+        continuousPollAfterEnrollmentOpensMilliseconds, gotifyURL);
   } catch (error) {
-    sendErrorEmailNotification(mailgun, error, mailgunCredentials);
+    sendErrorNotification(error, gotifyURL);
   }
 })();

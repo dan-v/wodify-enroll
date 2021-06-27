@@ -10,6 +10,7 @@
     "url": "https://github.com/lelandjansen/wodify-enroll.git"
   },
   "dependencies": {
+    "axios": "^0.21.1",
     "dotenv": "^8.2.0",
     "mailgun-js": "^0.22.0",
     "puppeteer": "^5.0.0"
